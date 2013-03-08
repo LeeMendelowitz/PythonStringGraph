@@ -154,7 +154,7 @@ class Node(object):
             if not util.edgeListIsSorted(wxEdges):
                 raise RuntimeError('Adjaceny list must be sorted before transitive reduction')
 
-            # Note the : It's possible that a node X was not marked as ELIMINATED above due to some missing overlap (w_i, x) for some i.
+            # It's possible that a node X was not marked as ELIMINATED above due to some missing overlap (w_i, x) for some i.
             # This code below tries to handle this case of a missing overlap 
             for edgeRank, wxEdge in enumerate(wxEdges): # line 11
                 if ((wxEdge.len < FUZZ) or (edgeRank == 0)):
@@ -180,9 +180,10 @@ class Node(object):
         return reducedEdges
 
 
+    ###################################
     # Get the unipath which starts from this node, leaving end
     # Return the list of edges of the path.
-    def findUnipath(self, end):
+    def walkUnipath(self, end):
         assert end in ('B', 'E')
 
         edges = []
@@ -202,12 +203,16 @@ class Node(object):
 
             # Check that the curNode is unique predecessor of the successor
             targetPredecessors = e.target.getEdges(e.targetEnd)
+            assert(len(targetPredecessors) > 0)
             if len(targetPredecessors) != 1:
                 break
 
             edges.append(e)
             curNode = e.target
             curEnd = e.targetEnd
+
+            if (curNode.color != GREEN):
+                raise RuntimeError('Unipath search is not sane!')
 
             # If the next node is the starting node, then this is cycle.
             if curNode == self:
@@ -217,6 +222,29 @@ class Node(object):
                 break
 
         return edges
+
+    # Find the unipath which includes this node.
+    # Return the path as a walk.
+    def findUnipath(self):
+        forwardEdges = self.walkUnipath('E')
+        isCycle = bool(forwardEdges) and (forwardEdges[-1].target == self)
+
+        path = []
+        if isCycle:
+            # Do not include the last edge of the cycle when reporting the path.
+            # This is to avoid duplicating the repeated first/last node when working with the unipath.
+            path = forwardEdges[:-1]
+        else:
+            backwardEdges = self.walkUnipath('B')
+            # Reverse the backward edges to orient the path forward through self
+            backwardEdges = [e.twin for e in backwardEdges[::-1]]
+            path = backwardEdges + forwardEdges
+
+        root = path[0].src if path else self
+        walk = Walk(root = root, edges = path)
+        walkNodes = walk.nodes()
+        return walk
+
 
     def reduceTransitiveEdges(self, transitiveEdgeSet):
 
@@ -515,11 +543,17 @@ class Walk(object):
     def nodes(self):
         return list(self.nodeIter())
 
+    def __str__(self):
+        myStr = 'Root: %s\n'%str(self.root)
+        myStr += '\n'.join(str(e) for e in self.edges)
+        return myStr
+
     # Compute the layout of the reads in the walk
     # The layout is given as a list of NodePlacements
     def computeLayout(self):
 
         layout = [NodePlacement(self.root, 0, self.root.length, self.rootIsForward)]
+        self.layout = layout
 
         if not self.edges:
             return layout
@@ -607,7 +641,8 @@ class StringGraph(object):
         for n in self.nodeIter():
             reducibleEdges.extend(n.findTransitiveEdges('B'))
             reducibleEdges.extend(n.findTransitiveEdges('E'))
-        reducibleEdges = set(reducibleEdges)
+        reducibleEdgesTwins = [e.twin for e in reducibleEdges]
+        reducibleEdges = set(e for el in (reducibleEdges, reducibleEdgesTwins) for e in el)
 
         for n in self.nodeIter():
             n.reduceTransitiveEdges(reducibleEdges)
@@ -630,27 +665,17 @@ class StringGraph(object):
             if curNode.color == RED: # Node already placed in path
                 continue
 
-            forwardEdges = curNode.findUnipath('E')
-            isCycle = (forwardEdges) and (forwardEdges[-1].target == curNode)
-
-            if isCycle:
-                # Do not include the last edge of the cycle when reporting the path.
-                # This is to avoid duplicating the repeated first/last node when working with the unipath.
-                path = forwardEdges[:-1]
-            else:
-                backwardEdges = curNode.findUnipath('B')
-                # Reverse the backward edges to orient the path forward through curNode
-                backwardEdges = [e.twin for e in backwardEdges[::-1]]
-                path = backwardEdges + forwardEdges
-
-            root = path[0].src if path else curNode
-            walk = Walk(root = root, edges = path)
+            walk = curNode.findUnipath()
             walkNodes = walk.nodes()
 
             # if everything worked correctly, all the nodes in the path should be GREEN
             # since a node can belong to only one unipath
-            for n in walkNodes:
-                assert(n.color == GREEN)
+            walkIsSane = walk.checkSane()
+            if not walkIsSane:
+                raise RuntimeError('Walk is not sane!')
+            nodesOK = all(n.color==GREEN for n in walkNodes)
+            if not nodesOK:
+                raise RuntimeError('Nodes used in more than one walk!')
 
             # set all unipath nodes to RED
             for n in walkNodes:
@@ -690,6 +715,18 @@ class StringGraph(object):
 
     def edges(self):
         return list(self.edgeIter())
+
+    def checkEdgesAreSane(self):
+        for n in self.nodeIter():
+            edges = (e for el in (n.BEdges, n.EEdges) for e in el)
+            for edge in edges:
+                assert(edge.src == n)
+                target = edge.target
+                targetEnd = edge.targetEnd
+                assert(targetEnd in 'BE')
+                targetEdges = target.BEdges if targetEnd =='B' else target.EEdges
+                if edge.twin not in targetEdges:
+                    raise RuntimeError('Graph is not sane! Missing edge: %s'%str(edge.twin))
 
     # Get a node using the dictionary like syntax:
     # node = StringGraph[nodeId]
